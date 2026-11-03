@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local runtime state
+paper_trading.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets and local configuration
+.env
+.streamlit/secrets.toml
+
+# Streamlit cache
+.streamlit/cache/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
