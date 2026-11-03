@@ -7,9 +7,11 @@ Streamlit dashboard for SOLUSDT Binance Futures market data, technical signals, 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-streamlit run app.py
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 ```
+
+For a complete migration guide, environment troubleshooting, dependency checklist, and deployment steps, see [`docs/SETUP_AND_MIGRATION.md`](docs/SETUP_AND_MIGRATION.md).
 
 ## Deploy on Streamlit Community Cloud
 
