@@ -1,8 +1,12 @@
 import requests
 import pandas as pd
 
-# Binance USDⓈ-M Futures API
-BASE_URL = "https://fapi.binance.com"
+# Binance endpoints. Some hosting regions receive HTTP 451 from the
+# Futures endpoint, so the public market-data mirror is used as a fallback.
+ENDPOINTS = (
+    ("Binance Futures", "https://fapi.binance.com/fapi/v1/klines"),
+    ("Binance Public Data", "https://data-api.binance.vision/api/v3/klines"),
+)
 
 
 def get_market_data(
@@ -15,23 +19,34 @@ def get_market_data(
     Hanya candle yang sudah selesai digunakan.
     """
 
-    endpoint = f"{BASE_URL}/fapi/v1/klines"
-
     params = {
         "symbol": symbol,
         "interval": interval,
         "limit": limit
     }
 
-    response = requests.get(
-        endpoint,
-        params=params,
-        timeout=15
-    )
+    data = None
+    errors = []
 
-    response.raise_for_status()
+    for endpoint_name, endpoint in ENDPOINTS:
+        try:
+            response = requests.get(
+                endpoint,
+                params=params,
+                headers={"User-Agent": "SOLUSDT-Signal-Bot/1.0"},
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except requests.RequestException as exc:
+            errors.append(f"{endpoint_name}: {exc}")
 
-    data = response.json()
+    if data is None:
+        raise requests.RequestException(
+            "Semua endpoint market data Binance gagal. "
+            + " | ".join(errors)
+        )
 
     columns = [
         "open_time",
