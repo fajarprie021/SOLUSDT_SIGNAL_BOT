@@ -75,8 +75,23 @@ Kemudian aktifkan ulang environment.
 Verifikasi bahwa Python berasal dari project, bukan instalasi global:
 
 ```powershell
+Get-Command python
 python --version
 python -c "import sys; print(sys.executable)"
+```
+
+`Get-Command python` dan `sys.executable` harus menunjuk ke `venv\\Scripts\\python.exe`. Jika prompt menampilkan `(venv)` tetapi `Get-Command python` masih menunjuk ke `WindowsApps\\python.exe`, environment belum benar-benar aktif atau alias Python Windows mengambil alih. Gunakan executable environment secara eksplisit:
+
+```powershell
+.\\venv\\Scripts\\python.exe -m pip install -r requirements.txt
+.\\venv\\Scripts\\python.exe test_strategy_b.py
+```
+
+Alternatifnya, tutup terminal, buka terminal baru dari root project, lalu aktifkan ulang:
+
+```powershell
+.\\venv\\Scripts\\Activate.ps1
+Get-Command python
 ```
 
 Output executable harus menunjuk ke pola berikut:
