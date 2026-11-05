@@ -1,0 +1,302 @@
+
+import sqlite3
+import json
+
+from pathlib import Path
+from datetime import datetime, timezone
+def current_time():
+    return datetime.now(timezone.utc).isoformat()
+
+# ==========================================
+# DATABASE CONFIGURATION
+# ==========================================
+
+DB_PATH = Path(__file__).resolve().parent / "strategy_b.db"
+
+
+def get_connection():
+
+    conn = sqlite3.connect(DB_PATH)
+
+    conn.row_factory = sqlite3.Row
+
+    return conn
+
+
+# ==========================================
+# INITIALIZE DATABASE
+# ==========================================
+
+def initialize_database():
+
+    with get_connection() as conn:
+
+        cursor = conn.cursor()
+
+        # Account state
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS account_state (
+                id INTEGER PRIMARY KEY,
+                balance REAL NOT NULL,
+                position_json TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        
+        # Add persistent kill switch column if missing
+        columns = [
+            row["name"]
+            for row in cursor.execute(
+                "PRAGMA table_info(account_state)"
+            ).fetchall()
+        ]
+
+        if "kill_switch_active" not in columns:
+            cursor.execute("""
+                ALTER TABLE account_state
+                ADD COLUMN kill_switch_active INTEGER
+                NOT NULL DEFAULT 0
+            """)
+
+
+        # Trade history
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                margin REAL NOT NULL,
+                notional REAL NOT NULL,
+                pnl REAL NOT NULL,
+                reason TEXT NOT NULL,
+                entry_time TEXT,
+                exit_time TEXT NOT NULL
+            )
+        """)
+
+        # Create initial account if absent
+        cursor.execute("""
+            SELECT id FROM account_state WHERE id = 1
+        """)
+
+        account = cursor.fetchone()
+
+        if account is None:
+
+            cursor.execute("""
+                INSERT INTO account_state (
+                    id,
+                    balance,
+                    position_json,
+                    updated_at
+                )
+                VALUES (1, 5000.0, NULL, ?)
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+            ))
+
+        conn.commit()
+
+
+# ==========================================
+# SAVE ACCOUNT STATE
+# ==========================================
+
+def save_account_state(balance, position=None):
+
+    position_json = None
+
+    if position is not None:
+
+        position_json = json.dumps(position)
+
+    with get_connection() as conn:
+
+        conn.execute("""
+            INSERT OR REPLACE INTO account_state (
+                id,
+                balance,
+                position_json,
+                updated_at
+            )
+            VALUES (1, ?, ?, ?)
+        """, (
+            float(balance),
+            position_json,
+            datetime.now(timezone.utc).isoformat()
+        ))
+
+        conn.commit()
+
+
+# ==========================================
+# LOAD ACCOUNT STATE
+# ==========================================
+
+def load_account_state():
+
+    with get_connection() as conn:
+
+        row = conn.execute("""
+            SELECT balance, position_json
+            FROM account_state
+            WHERE id = 1
+        """).fetchone()
+
+    if row is None:
+
+        return {
+            "balance": 5000.0,
+            "position": None
+        }
+
+    position = None
+
+    if row["position_json"]:
+
+        position = json.loads(
+            row["position_json"]
+        )
+
+    return {
+        "balance": float(row["balance"]),
+        "position": position
+    }
+
+
+# ==========================================
+# SAVE CLOSED TRADE
+# ==========================================
+
+def save_trade(trade):
+
+    with get_connection() as conn:
+
+        conn.execute("""
+            INSERT INTO trade_history (
+                side,
+                entry_price,
+                exit_price,
+                quantity,
+                margin,
+                notional,
+                pnl,
+                reason,
+                entry_time,
+                exit_time
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade["side"],
+            trade["entry_price"],
+            trade["exit_price"],
+            trade["quantity"],
+            trade["margin"],
+            trade["notional"],
+            trade["pnl"],
+            trade["reason"],
+            trade["entry_time"],
+            trade["exit_time"]
+        ))
+
+        conn.commit()
+
+
+# ==========================================
+# LOAD TRADE HISTORY
+# ==========================================
+
+def get_trade_history(limit=100):
+
+    with get_connection() as conn:
+
+        rows = conn.execute("""
+            SELECT *
+            FROM trade_history
+            ORDER BY id DESC
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+# ==========================================
+# DATABASE SUMMARY
+# ==========================================
+
+def get_database_summary():
+
+    initialize_database()
+
+    account = load_account_state()
+
+    history = get_trade_history(limit=100000)
+
+    total_trades = len(history)
+
+    winning_trades = sum(
+        1 for trade in history
+        if trade["pnl"] > 0
+    )
+
+    losing_trades = sum(
+        1 for trade in history
+        if trade["pnl"] < 0
+    )
+
+    total_pnl = sum(
+        trade["pnl"]
+        for trade in history
+    )
+
+    return {
+        "database_path": str(DB_PATH),
+        "balance": account["balance"],
+        "open_position": account["position"],
+        "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "total_realized_pnl": round(total_pnl, 4)
+    }
+
+
+# Initialize automatically when imported
+initialize_database()
+
+# ==========================================
+# EQUITY KILL SWITCH
+# ==========================================
+
+def load_kill_switch():
+
+    with get_connection() as conn:
+
+        row = conn.execute("""
+            SELECT kill_switch_active
+            FROM account_state
+            WHERE id = 1
+        """).fetchone()
+
+    return bool(row["kill_switch_active"]) if row else False
+
+
+def save_kill_switch(active=True):
+
+    with get_connection() as conn:
+
+        conn.execute("""
+            UPDATE account_state
+            SET kill_switch_active = ?,
+                updated_at = ?
+            WHERE id = 1
+        """, (
+            1 if active else 0,
+            current_time()
+        ))
+
+        conn.commit()

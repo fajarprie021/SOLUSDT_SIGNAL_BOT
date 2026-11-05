@@ -1,0 +1,411 @@
+﻿=====================================================
+SOLUSDT SIGNAL BOT - STRATEGY B SOURCE REVIEW
+=====================================================
+Export Date : 11/04/2026 23:55:06
+Project     : F:\AI\SOLUSDT_SIGNAL_BOT
+
+
+=====================================================
+FILE: data\multi_timeframe_data.py
+=====================================================
+
+import pandas as pd
+
+from datetime import datetime, timezone
+from data.binance_data import get_market_data
+
+
+# ==========================================
+# MULTI TIMEFRAME CONFIGURATION
+# ==========================================
+
+SYMBOL = "SOLUSDT"
+
+TIMEFRAMES = {
+    "4h": {
+        "interval": "4h",
+        "seconds": 4 * 60 * 60,
+        "limit": 300
+    },
+    "1h": {
+        "interval": "1h",
+        "seconds": 60 * 60,
+        "limit": 300
+    },
+    "15m": {
+        "interval": "15m",
+        "seconds": 15 * 60,
+        "limit": 300
+    }
+}
+
+
+# ==========================================
+# REMOVE INCOMPLETE CANDLE
+# ==========================================
+
+def remove_incomplete_candles(df, timeframe_seconds):
+
+    df = df.copy()
+
+    if "open_time" not in df.columns:
+        raise ValueError(
+            "Kolom open_time tidak ditemukan."
+        )
+
+    df["open_time"] = pd.to_datetime(
+        df["open_time"],
+        utc=True
+    )
+
+    current_time = pd.Timestamp.now(tz="UTC")
+
+    candle_close_time = (
+        df["open_time"]
+        + pd.to_timedelta(timeframe_seconds, unit="s")
+    )
+
+    # Hanya candle yang sudah selesai
+    df = df[candle_close_time <= current_time]
+
+    return df.reset_index(drop=True)
+
+
+# ==========================================
+# GET SINGLE TIMEFRAME DATA
+# ==========================================
+
+def get_timeframe_data(
+    symbol,
+    timeframe,
+    limit=300
+):
+
+    if timeframe not in TIMEFRAMES:
+        raise ValueError(
+            f"Timeframe tidak didukung: {timeframe}"
+        )
+
+    config = TIMEFRAMES[timeframe]
+
+    df = get_market_data(
+        symbol=symbol,
+        interval=config["interval"],
+        limit=limit
+    )
+
+    if df is None or df.empty:
+        raise ValueError(
+            f"Data {timeframe} tidak tersedia."
+        )
+
+    required_columns = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]
+
+    for column in required_columns:
+
+        if column not in df.columns:
+            raise ValueError(
+                f"Kolom {column} tidak tersedia pada {timeframe}."
+            )
+
+    # Pastikan data numerik
+    for column in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+    ]:
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    df = df.dropna(
+        subset=["open", "high", "low", "close", "volume"]
+    )
+
+    # Hapus candle yang masih berjalan
+    df = remove_incomplete_candles(
+        df,
+        config["seconds"]
+    )
+
+    if len(df) < 200:
+        raise ValueError(
+            f"Data candle {timeframe} hanya {len(df)}. "
+            "Minimal 200 candle tertutup diperlukan."
+        )
+
+    return df
+
+
+# ==========================================
+# GET ALL MULTI TIMEFRAME DATA
+# ==========================================
+
+def get_multi_timeframe_data(
+    symbol=SYMBOL,
+    limit=300
+):
+
+    results = {}
+
+    for timeframe in ["4h", "1h", "15m"]:
+
+        print(
+            f"Mengambil data {symbol} timeframe {timeframe}..."
+        )
+
+        df = get_timeframe_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit
+        )
+
+        results[timeframe] = df
+
+        print(
+            f"Berhasil: {len(df)} candle tertutup"
+        )
+
+    return results
+
+
+# ==========================================
+# DISPLAY DATA INFORMATION
+# ==========================================
+
+def display_multi_timeframe_data(data):
+
+    print("\n")
+    print("=" * 65)
+    print("SOLUSDT MULTI-TIMEFRAME MARKET DATA")
+    print("=" * 65)
+
+    for timeframe, df in data.items():
+
+        print(f"\nTIMEFRAME : {timeframe}")
+
+        print(f"Total Candle : {len(df)}")
+
+        print(
+            "Last Candle :",
+            df.iloc[-1]["open_time"]
+        )
+
+        print(
+            "Last Close  :",
+            df.iloc[-1]["close"]
+        )
+
+    print("\n")
+    print(
+        "Checked at:",
+        datetime.now(timezone.utc)
+    )
+
+    print("=" * 65)
+
+
+=====================================================
+FILE: strategies\trend_filter.py
+=====================================================
+
+import pandas as pd
+
+
+def calculate_trend(df):
+    """
+    Menghitung tren berdasarkan:
+    EMA 20, EMA 50, dan SMA 200.
+
+    Input:
+        df = DataFrame OHLCV dengan kolom close.
+
+    Output:
+        BULLISH (+1), BEARISH (-1), atau NEUTRAL (0).
+    """
+
+    required_columns = ["close"]
+
+    for column in required_columns:
+        if column not in df.columns:
+            raise ValueError(
+                f"Kolom {column} tidak ditemukan."
+            )
+
+    if len(df) < 200:
+        return {
+            "trend": "NEUTRAL",
+            "score": 0,
+            "reason": "Data belum mencukupi 200 candle."
+        }
+
+    data = df.copy()
+
+    data["ema20"] = data["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
+
+    data["ema50"] = data["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
+
+    data["sma200"] = data["close"].rolling(
+        window=200
+    ).mean()
+
+    current = data.iloc[-1]
+
+    close = current["close"]
+    ema20 = current["ema20"]
+    ema50 = current["ema50"]
+    sma200 = current["sma200"]
+
+    # Bullish condition
+    bullish = (
+        close > ema20
+        and ema20 > ema50
+        and close > sma200
+    )
+
+    # Bearish condition
+    bearish = (
+        close < ema20
+        and ema20 < ema50
+        and close < sma200
+    )
+
+    if bullish:
+
+        return {
+            "trend": "BULLISH",
+            "score": 1,
+            "reason": "Close > EMA20 > EMA50 dan Close > SMA200",
+            "close": float(close),
+            "ema20": float(ema20),
+            "ema50": float(ema50),
+            "sma200": float(sma200)
+        }
+
+    elif bearish:
+
+        return {
+            "trend": "BEARISH",
+            "score": -1,
+            "reason": "Close < EMA20 < EMA50 dan Close < SMA200",
+            "close": float(close),
+            "ema20": float(ema20),
+            "ema50": float(ema50),
+            "sma200": float(sma200)
+        }
+
+    return {
+        "trend": "NEUTRAL",
+        "score": 0,
+        "reason": "Kondisi bullish atau bearish belum terpenuhi",
+        "close": float(close),
+        "ema20": float(ema20),
+        "ema50": float(ema50),
+        "sma200": float(sma200)
+    }
+
+
+def calculate_multi_timeframe_trend(
+    df_4h,
+    df_1h,
+    df_15m
+):
+    """
+    Menggabungkan skor tren 4H, 1H, dan 15M.
+    """
+
+    trend_4h = calculate_trend(df_4h)
+    trend_1h = calculate_trend(df_1h)
+    trend_15m = calculate_trend(df_15m)
+
+    total_score = (
+        trend_4h["score"]
+        + trend_1h["score"]
+        + trend_15m["score"]
+    )
+
+    if total_score >= 2:
+        final_trend = "BULLISH"
+
+    elif total_score <= -2:
+        final_trend = "BEARISH"
+
+    else:
+        final_trend = "NEUTRAL"
+
+    return {
+        "trend_4h": trend_4h,
+        "trend_1h": trend_1h,
+        "trend_15m": trend_15m,
+        "total_score": total_score,
+        "final_trend": final_trend
+    }
+
+
+=====================================================
+FILE: strategies\strategy_b.py
+=====================================================
+
+from strategies.ema_triple_crossover import (
+    calculate_triple_ema_signal
+)
+
+
+def generate_strategy_b_signal(trend_result, df_1m):
+
+    # Multi-timeframe trend
+    trend = trend_result["final_trend"]
+
+    # Calculate triple EMA
+    entry = calculate_triple_ema_signal(df_1m)
+
+    crossover = entry["signal"]
+
+    final_signal = "WAIT"
+
+    # LONG condition
+    if trend == "BULLISH" and crossover == "LONG":
+        final_signal = "LONG"
+
+    # SHORT condition
+    elif trend == "BEARISH" and crossover == "SHORT":
+        final_signal = "SHORT"
+
+    return {
+        "strategy": "B",
+
+        "market_trend": trend,
+        "trend_score": trend_result["total_score"],
+
+        "crossover_signal": crossover,
+        "final_signal": final_signal,
+
+        "ema8": entry.get("ema8"),
+        "ema21": entry.get("ema21"),
+        "ema185": entry.get("ema185"),
+
+        "close": entry.get("close"),
+
+        "entry_reason": entry.get(
+            "reason",
+            "No signal information"
+        )
+    }
+

@@ -1,0 +1,46 @@
+
+from strategies.ema_triple_crossover import (
+    calculate_triple_ema_signal
+)
+
+
+def generate_strategy_b_signal(trend_result, df_1m):
+
+    # Multi-timeframe trend
+    trend = trend_result["final_trend"]
+
+    # Calculate triple EMA
+    entry = calculate_triple_ema_signal(df_1m)
+
+    crossover = entry["signal"]
+
+    final_signal = "WAIT"
+
+    # LONG condition
+    if trend == "BULLISH" and crossover == "LONG":
+        final_signal = "LONG"
+
+    # SHORT condition
+    elif trend == "BEARISH" and crossover == "SHORT":
+        final_signal = "SHORT"
+
+    return {
+        "strategy": "B",
+
+        "market_trend": trend,
+        "trend_score": trend_result["total_score"],
+
+        "crossover_signal": crossover,
+        "final_signal": final_signal,
+
+        "ema8": entry.get("ema8"),
+        "ema21": entry.get("ema21"),
+        "ema185": entry.get("ema185"),
+
+        "close": entry.get("close"),
+
+        "entry_reason": entry.get(
+            "reason",
+            "No signal information"
+        )
+    }

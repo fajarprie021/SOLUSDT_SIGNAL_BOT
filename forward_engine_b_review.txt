@@ -1,0 +1,864 @@
+﻿
+from dataclasses import dataclass, asdict
+from typing import Optional
+from datetime import datetime, timezone
+
+from paper_trading.database_b import (
+    initialize_database,
+    load_account_state,
+    save_account_state,
+    save_trade,
+    get_trade_history,
+    load_kill_switch,
+    save_kill_switch,
+)
+
+
+# ==========================================================
+# STRATEGY B CONFIGURATION
+# ==========================================================
+
+INITIAL_BALANCE = 5000.0
+
+FIXED_MARGIN = 500.0
+
+LEVERAGE = 10
+
+NOTIONAL = FIXED_MARGIN * LEVERAGE
+
+MAX_OPEN_POSITIONS = 1
+
+RISK_REWARD = 2.0
+
+MAX_DRAWDOWN_PERCENT = 5.0
+
+MAX_DRAWDOWN_AMOUNT = (
+    INITIAL_BALANCE * MAX_DRAWDOWN_PERCENT / 100
+)
+
+MINIMUM_EQUITY = (
+    INITIAL_BALANCE - MAX_DRAWDOWN_AMOUNT
+)
+
+
+# ==========================================================
+# POSITION DATA
+# ==========================================================
+
+@dataclass
+class PositionB:
+
+    side: str
+
+    entry_price: float
+
+    quantity: float
+
+    margin: float
+
+    notional: float
+
+    initial_sl: float
+
+    stop_loss: float
+
+    take_profit: float
+
+    entry_time: str
+
+    entry_ema21: float
+
+    entry_ema185: float
+
+
+# ==========================================================
+# FORWARD ENGINE B
+# ==========================================================
+
+class ForwardEngineB:
+
+    # ======================================================
+    # INITIALIZATION / RESTART RECOVERY
+    # ======================================================
+
+    def __init__(self):
+
+        initialize_database()
+
+        account = load_account_state()
+
+        self.balance = float(
+            account["balance"]
+        )
+
+        saved_position = account.get(
+            "position"
+        )
+
+        if saved_position is not None:
+
+            self.position = PositionB(
+                **saved_position
+            )
+
+        else:
+
+            self.position = None
+
+        self.trade_history = get_trade_history(
+            limit=100000
+        )
+
+        self.kill_switch_active = load_kill_switch()
+
+        self.last_processed_candle = None
+
+        # Check account equity after recovery.
+        self.check_equity_kill_switch()
+
+    # ======================================================
+    # SAVE STATE
+    # ======================================================
+
+    def save_state(self):
+
+        position_data = None
+
+        if self.position is not None:
+
+            position_data = asdict(
+                self.position
+            )
+
+        save_account_state(
+            balance=self.balance,
+            position=position_data
+        )
+
+        save_kill_switch(
+            self.kill_switch_active
+        )
+
+    # ======================================================
+    # ACCOUNT INFORMATION
+    # ======================================================
+
+    def get_account(self, price=None):
+
+        unrealized = self.get_unrealized_pnl(
+            price
+        )
+
+        margin_used = (
+            self.position.margin
+            if self.position is not None
+            else 0.0
+        )
+
+        equity = self.balance + unrealized
+
+        return {
+
+            "initial_balance": INITIAL_BALANCE,
+
+            "balance": round(
+                self.balance, 4
+            ),
+
+            "available_balance": round(
+                self.balance - margin_used, 4
+            ),
+
+            "margin_used": round(
+                margin_used, 4
+            ),
+
+            "unrealized_pnl": round(
+                unrealized, 4
+            ),
+
+            "equity": round(
+                equity, 4
+            ),
+
+            "leverage": LEVERAGE,
+
+            "notional": (
+                self.position.notional
+                if self.position is not None
+                else 0.0
+            ),
+
+            "kill_switch_active": (
+                self.kill_switch_active
+            ),
+
+            "open_position": (
+                asdict(self.position)
+                if self.position is not None
+                else None
+            )
+        }
+
+    # ======================================================
+    # UNREALIZED PNL
+    # ======================================================
+
+    def get_unrealized_pnl(self, price=None):
+
+        if self.position is None:
+
+            return 0.0
+
+        pos = self.position
+
+        if price is None:
+
+            price = pos.entry_price
+
+        price = float(price)
+
+        if price <= 0:
+
+            raise ValueError(
+                "Market price must be positive."
+            )
+
+        if pos.side == "LONG":
+
+            return (
+                price - pos.entry_price
+            ) * pos.quantity
+
+        return (
+            pos.entry_price - price
+        ) * pos.quantity
+
+    # ======================================================
+    # EQUITY KILL SWITCH
+    # ======================================================
+
+    def check_equity_kill_switch(self, price=None):
+
+        equity = (
+            self.balance
+            + self.get_unrealized_pnl(price)
+        )
+
+        if equity <= MINIMUM_EQUITY:
+
+            if not self.kill_switch_active:
+
+                self.kill_switch_active = True
+
+                self.save_state()
+
+            return True
+
+        return self.kill_switch_active
+
+    # ======================================================
+    # KILL SWITCH STATUS
+    # ======================================================
+
+    def get_kill_switch_status(self, price=None):
+
+        equity = (
+            self.balance
+            + self.get_unrealized_pnl(price)
+        )
+
+        return {
+
+            "active": self.kill_switch_active,
+
+            "equity": round(equity, 4),
+
+            "minimum_equity": MINIMUM_EQUITY,
+
+            "max_drawdown_percent": (
+                MAX_DRAWDOWN_PERCENT
+            ),
+
+            "new_entries_allowed": (
+                not self.kill_switch_active
+            )
+        }
+
+    # ======================================================
+    # MANUAL KILL SWITCH RESET
+    # ======================================================
+
+    def reset_kill_switch(self):
+
+        # Reset is allowed only when no position is open.
+        if self.position is not None:
+
+            return {
+                "success": False,
+                "reason": "Close open position before reset."
+            }
+
+        equity = self.balance
+
+        if equity <= MINIMUM_EQUITY:
+
+            return {
+                "success": False,
+                "reason": "Equity is still below the safety limit."
+            }
+
+        self.kill_switch_active = False
+
+        self.save_state()
+
+        return {
+            "success": True,
+            "reason": "Kill switch manually reset."
+        }
+
+    # ======================================================
+    # OPEN POSITION
+    # ======================================================
+
+    def open_position(
+        self,
+        side,
+        entry_price,
+        ema21,
+        ema185,
+        candle_time
+    ):
+
+        # Check existing position.
+        if self.position is not None:
+
+            return {
+                "success": False,
+                "reason": "Position already open."
+            }
+
+        # Check equity protection.
+        if self.check_equity_kill_switch():
+
+            return {
+                "success": False,
+                "reason": "EQUITY KILL SWITCH ACTIVE. New entries blocked."
+            }
+
+        # Validate side.
+        if side not in ["LONG", "SHORT"]:
+
+            return {
+                "success": False,
+                "reason": "Invalid position side."
+            }
+
+        # Validate input.
+        try:
+
+            entry_price = float(entry_price)
+
+            ema21 = float(ema21)
+
+            ema185 = float(ema185)
+
+        except (TypeError, ValueError):
+
+            return {
+                "success": False,
+                "reason": "Invalid price or EMA values."
+            }
+
+        if any(
+            value <= 0
+            for value in [
+                entry_price,
+                ema21,
+                ema185
+            ]
+        ):
+
+            return {
+                "success": False,
+                "reason": "Price and EMA must be positive."
+            }
+
+        # Validate balance.
+        if self.balance < FIXED_MARGIN:
+
+            return {
+                "success": False,
+                "reason": "Insufficient available balance."
+            }
+
+        # Validate EMA structure.
+        if side == "LONG" and ema21 <= ema185:
+
+            return {
+                "success": False,
+                "reason": "LONG EMA structure invalid."
+            }
+
+        if side == "SHORT" and ema21 >= ema185:
+
+            return {
+                "success": False,
+                "reason": "SHORT EMA structure invalid."
+            }
+
+        # Calculate quantity.
+        quantity = NOTIONAL / entry_price
+
+        # Initial SL based on EMA21.
+        initial_sl = ema21
+
+        if side == "LONG":
+
+            if initial_sl >= entry_price:
+
+                return {
+                    "success": False,
+                    "reason": "LONG stop must be below entry."
+                }
+
+            risk_distance = (
+                entry_price - initial_sl
+            )
+
+            take_profit = (
+                entry_price
+                + risk_distance * RISK_REWARD
+            )
+
+        else:
+
+            if initial_sl <= entry_price:
+
+                return {
+                    "success": False,
+                    "reason": "SHORT stop must be above entry."
+                }
+
+            risk_distance = (
+                initial_sl - entry_price
+            )
+
+            take_profit = (
+                entry_price
+                - risk_distance * RISK_REWARD
+            )
+
+        # Create position.
+        self.position = PositionB(
+
+            side=side,
+
+            entry_price=entry_price,
+
+            quantity=quantity,
+
+            margin=FIXED_MARGIN,
+
+            notional=NOTIONAL,
+
+            initial_sl=initial_sl,
+
+            stop_loss=initial_sl,
+
+            take_profit=take_profit,
+
+            entry_time=str(candle_time),
+
+            entry_ema21=ema21,
+
+            entry_ema185=ema185
+        )
+
+        # Save immediately.
+        self.save_state()
+
+        return {
+
+            "success": True,
+
+            "reason": "Paper position opened.",
+
+            "position": asdict(
+                self.position
+            )
+        }
+
+    # ======================================================
+    # TRAILING STOP
+    # ======================================================
+
+    def update_trailing_stop(self, ema21):
+
+        if self.position is None:
+
+            return
+
+        if ema21 is None:
+
+            return
+
+        try:
+
+            ema21 = float(ema21)
+
+        except (TypeError, ValueError):
+
+            return
+
+        if ema21 <= 0:
+
+            return
+
+        pos = self.position
+
+        old_stop = pos.stop_loss
+
+        if pos.side == "LONG":
+
+            # LONG SL can only move upward.
+            if ema21 > pos.stop_loss:
+
+                pos.stop_loss = ema21
+
+        else:
+
+            # SHORT SL can only move downward.
+            if ema21 < pos.stop_loss:
+
+                pos.stop_loss = ema21
+
+        if pos.stop_loss != old_stop:
+
+            self.save_state()
+
+    # ======================================================
+    # CLOSE POSITION
+    # ======================================================
+
+    def close_position(
+        self,
+        exit_price,
+        reason
+    ):
+
+        if self.position is None:
+
+            return None
+
+        exit_price = float(exit_price)
+
+        if exit_price <= 0:
+
+            raise ValueError(
+                "Exit price must be positive."
+            )
+
+        pos = self.position
+
+        pnl = self.get_unrealized_pnl(
+            exit_price
+        )
+
+        new_balance = self.balance + pnl
+
+        trade = {
+
+            "side": pos.side,
+
+            "entry_price": pos.entry_price,
+
+            "exit_price": exit_price,
+
+            "quantity": pos.quantity,
+
+            "margin": pos.margin,
+
+            "notional": pos.notional,
+
+            "pnl": round(pnl, 4),
+
+            "reason": reason,
+
+            "entry_time": pos.entry_time,
+
+            "exit_time": datetime.now(
+                timezone.utc
+            ).isoformat()
+        }
+
+        # Save transaction before updating memory.
+        save_trade(trade)
+
+        self.balance = new_balance
+
+        self.trade_history.append(trade)
+
+        self.position = None
+
+        self.save_state()
+
+        # Check realized equity after closing.
+        self.check_equity_kill_switch()
+
+        return trade
+
+    # ======================================================
+    # MONITOR POSITION
+    # ======================================================
+
+    def monitor_position(
+        self,
+        candle,
+        ema21,
+        ema185,
+        opposite_signal="WAIT"
+    ):
+
+        if self.position is None:
+
+            return None
+
+        pos = self.position
+
+        high = float(candle["high"])
+
+        low = float(candle["low"])
+
+        close = float(candle["close"])
+
+        ema185 = float(ema185)
+
+        if min(high, low, close, ema185) <= 0:
+
+            raise ValueError(
+                "Invalid candle or EMA185 value."
+            )
+
+        if high < low:
+
+            raise ValueError(
+                "Candle high cannot be lower than low."
+            )
+
+        # Check current equity using market close.
+        self.check_equity_kill_switch(
+            price=close
+        )
+
+        # IMPORTANT:
+        # Check the existing SL/TP before updating
+        # the trailing stop for the next candle.
+
+        if pos.side == "LONG":
+
+            if low <= pos.stop_loss:
+
+                return self.close_position(
+                    pos.stop_loss,
+                    "STOP_LOSS"
+                )
+
+            if high >= pos.take_profit:
+
+                return self.close_position(
+                    pos.take_profit,
+                    "TAKE_PROFIT"
+                )
+
+        else:
+
+            if high >= pos.stop_loss:
+
+                return self.close_position(
+                    pos.stop_loss,
+                    "STOP_LOSS"
+                )
+
+            if low <= pos.take_profit:
+
+                return self.close_position(
+                    pos.take_profit,
+                    "TAKE_PROFIT"
+                )
+
+        # EMA185 invalidation.
+        if (
+            pos.side == "LONG"
+            and close < ema185
+        ):
+
+            return self.close_position(
+                close,
+                "EMA185_INVALIDATION"
+            )
+
+        if (
+            pos.side == "SHORT"
+            and close > ema185
+        ):
+
+            return self.close_position(
+                close,
+                "EMA185_INVALIDATION"
+            )
+
+        # Opposite crossover exit.
+        if (
+            pos.side == "LONG"
+            and opposite_signal == "SHORT"
+        ):
+
+            return self.close_position(
+                close,
+                "OPPOSITE_CROSSOVER"
+            )
+
+        if (
+            pos.side == "SHORT"
+            and opposite_signal == "LONG"
+        ):
+
+            return self.close_position(
+                close,
+                "OPPOSITE_CROSSOVER"
+            )
+
+        # Update trailing SL for next candle.
+        self.update_trailing_stop(
+            ema21
+        )
+
+        return {
+
+            "status": "POSITION_OPEN",
+
+            "unrealized_pnl": round(
+                self.get_unrealized_pnl(close),
+                4
+            ),
+
+            "stop_loss": self.position.stop_loss,
+
+            "take_profit": self.position.take_profit,
+
+            "kill_switch_active": self.kill_switch_active
+        }
+
+    # ======================================================
+    # PROCESS SIGNAL
+    # ======================================================
+
+    def process_signal(
+        self,
+        trend,
+        entry_signal,
+        candle,
+        ema21,
+        ema185,
+        candle_time
+    ):
+
+        # Existing position must always be monitored,
+        # even when Kill Switch is active.
+        if self.position is not None:
+
+            result = self.monitor_position(
+
+                candle=candle,
+
+                ema21=ema21,
+
+                ema185=ema185,
+
+                opposite_signal=entry_signal
+            )
+
+            return {
+
+                "action": "MONITOR",
+
+                "result": result,
+
+                "account": self.get_account(
+                    candle["close"]
+                )
+            }
+
+        # Check Kill Switch before new entry.
+        if self.check_equity_kill_switch():
+
+            return {
+
+                "action": "BLOCKED",
+
+                "reason": "EQUITY KILL SWITCH ACTIVE",
+
+                "account": self.get_account()
+            }
+
+        # All 3 timeframes must agree.
+        if trend not in [
+            "BULLISH",
+            "BEARISH"
+        ]:
+
+            return {
+
+                "action": "WAIT",
+
+                "reason": "MTF trend is not confirmed.",
+
+                "account": self.get_account()
+            }
+
+        expected_signal = (
+
+            "LONG"
+            if trend == "BULLISH"
+            else "SHORT"
+        )
+
+        if entry_signal != expected_signal:
+
+            return {
+
+                "action": "WAIT",
+
+                "reason": "Entry signal does not match trend.",
+
+                "account": self.get_account()
+            }
+
+        result = self.open_position(
+
+            side=expected_signal,
+
+            entry_price=float(
+                candle["close"]
+            ),
+
+            ema21=ema21,
+
+            ema185=ema185,
+
+            candle_time=candle_time
+        )
+
+        return {
+
+            "action": (
+                "OPEN"
+                if result["success"]
+                else "REJECTED"
+            ),
+
+            "result": result,
+
+            "account": self.get_account()
+        }
